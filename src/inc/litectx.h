@@ -74,18 +74,14 @@ static __inline__ LiteCtx *LiteCtx_create(void (*fn)(LiteCtx*)) {
     ctx->_fctx = make_fcontext(stack_top, LITECTX_STACK_SIZE,
             (void (*)(void *))fn);
 
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_create: %p, ctx size = %lu, stack size = %lu, "
+    VERBOSE_MSG("LiteCtx_create: %p, ctx size = %lu, stack size = %lu, "
             "stack top = %p, stack bottom = %p\n", ctx, sizeof(LiteCtx),
             LITECTX_STACK_SIZE, stack_top, ctx->_stack);
-#endif
     return ctx;
 }
 
 static __inline__ void LiteCtx_destroy(LiteCtx *ctx) {
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_destroy: ctx=%p\n", ctx);
-#endif
+    VERBOSE_MSG("LiteCtx_destroy: ctx=%p\n", ctx);
 
 #ifdef OVERFLOW_PROTECT
     const int merr = mprotect(ctx, OVERFLOW_PADDING_SIZE,
@@ -110,16 +106,12 @@ static __inline__ LiteCtx *LiteCtx_proxy_create(const char *lbl) {
     memset(ctx, 0, sizeof(*ctx));
 #endif
 
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_proxy_create[%s]: %p\n", lbl, ctx);
-#endif
+    VERBOSE_MSG("LiteCtx_proxy_create[%s]: %p\n", lbl, ctx);
     return ctx;
 }
 
 static __inline__ void LiteCtx_proxy_destroy(LiteCtx *ctx) {
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_proxy_destroy: ctx=%p\n", ctx);
-#endif
+    VERBOSE_MSG("LiteCtx_proxy_destroy: ctx=%p\n", ctx);
 
 #ifdef OVERFLOW_PROTECT
     const int merr = mprotect(ctx, OVERFLOW_PADDING_SIZE,
@@ -174,18 +166,14 @@ static __inline__ void LiteCtx_proxy_destroy(LiteCtx *ctx) {
  */
 static __inline__ LiteCtx *LiteCtx_swap(LiteCtx *current, LiteCtx *next,
         const char *lbl) {
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_swap[%s]: current=%p(%p) next=%p(%p) on pthread "
+    VERBOSE_MSG("LiteCtx_swap[%s]: current=%p(%p) next=%p(%p) on pthread "
             "%p\n", lbl, current, current->_fctx.sp, next, next->_fctx.sp,
             (void *)pthread_self());
-#endif
     next->prev = current;
     LiteCtx *new_current = (LiteCtx *)jump_fcontext(&current->_fctx,
             next->_fctx, next, true);
-#ifdef VERBOSE
-    fprintf(stderr, "LiteCtx_swap: swapped in %p(%p) on pthread %p\n",
+    VERBOSE_MSG("LiteCtx_swap: swapped in %p(%p) on pthread %p\n",
             new_current, new_current->_fctx.sp, (void *)pthread_self());
-#endif
     return new_current;
 }
 
