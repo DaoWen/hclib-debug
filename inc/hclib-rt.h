@@ -97,6 +97,15 @@ typedef struct hclib_worker_state {
     } \
 } while (0)
 
+#define HCHECK(fn, ...) do { \
+    int _hclib_check_rt_failed = fn(__VA_ARGS__) != 0; \
+    if (HC_ASSERTION_CHECK_ENABLED && _hclib_check_rt_failed) { \
+        fprintf(stderr, "W%d: Non-zero return value (%d) from %s\n", \
+                get_current_worker(), _hclib_check_rt_failed, #fn); \
+        abort(); \
+    } \
+} while (0);
+
 #if defined(static_assert) || __cplusplus >= 201103L // defined in C11, C++11
 #define HASSERT_STATIC static_assert
 #elif __STDC_VERSION__ >= 201112L // C11
