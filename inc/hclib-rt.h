@@ -36,14 +36,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *      Acknowledgments: https://wiki.rice.edu/confluence/display/HABANERO/People
  */
 
+#ifndef HCLIB_RT_H_
+#define HCLIB_RT_H_
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <assert.h>
-#include "litectx.h"
+#include <stdbool.h>
 
-#ifndef HCLIB_RT_H_
-#define HCLIB_RT_H_
+#include "hclib_common.h"
+
+#if HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
+#include "litectx.h"
+#endif /* HCLIB_WORKER_STRATEGY */
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,8 +81,10 @@ typedef struct hclib_worker_state {
         struct hc_deque_t * deques;
         int id; // The id, identify a worker
         int did; // the mapping device id
+#if HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
         LiteCtx *curr_ctx;
         LiteCtx *root_ctx;
+#endif /* HCLIB_WORKER_STRATEGY */
 } hclib_worker_state;
 
 #define HCLIB_MACRO_CONCAT(x, y) _HCLIB_MACRO_CONCAT_IMPL(x, y)
@@ -97,11 +105,11 @@ typedef struct hclib_worker_state {
     } \
 } while (0)
 
-#define HCHECK(fn, ...) do { \
-    int _hclib_check_rt_failed = fn(__VA_ARGS__) != 0; \
+#define HCHECK(expr) do { \
+    int _hclib_check_rt_failed = (expr) != 0; \
     if (HC_ASSERTION_CHECK_ENABLED && _hclib_check_rt_failed) { \
-        fprintf(stderr, "W%d: Non-zero return value (%d) from %s\n", \
-                get_current_worker(), _hclib_check_rt_failed, #fn); \
+        fprintf(stderr, "W%d: Non-zero return value (%d) from:\n\t%s\n", \
+                get_current_worker(), _hclib_check_rt_failed, #expr); \
         abort(); \
     } \
 } while (0);
