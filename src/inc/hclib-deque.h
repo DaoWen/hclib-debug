@@ -46,7 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /* DEQUE API                                        */
 /****************************************************/
 
-#define INIT_DEQUE_CAPACITY 8096
+#define INIT_DEQUE_CAPACITY (1<<14) // 16k
 
 typedef struct deque_t {
     _Atomic int head;
