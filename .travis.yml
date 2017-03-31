@@ -1,6 +1,6 @@
 # Use Ubuntu 14.04 Trusty for GCC 4.8
-sudo: required
 dist: trusty
+sudo: required
 language: cpp
 
 branches:
@@ -11,8 +11,17 @@ matrix:
   include:
   - compiler: gcc
   - compiler: clang
+  - env: TRAVIS_CC=gcc-5 TRAVIS_CXX=g++-5
+    addons:
+      apt:
+        packages:
+          - g++-5
+        sources:
+          - ubuntu-toolchain-r-test
 
 before_install:
+- export CC=${TRAVIS_CC:-$CC} && $CC --version
+- export CXX=${TRAVIS_CXX:-$CXX} && $CXX --version
 - sudo apt-get update -qq
 - sudo apt-get install -y libxml2-dev
 
