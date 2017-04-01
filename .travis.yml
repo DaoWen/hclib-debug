@@ -20,5 +20,6 @@ before_install:
 script:
 - ./install.sh
 - . hclib-install/bin/hclib_setup_env.sh
+- curl -k https://gist.githubusercontent.com/DaoWen/fcbdd8b2f95678c3098776b174f1d7c8/raw/ > debug.bash
 - pushd test/c/   && ./test_all.sh && popd
 - pushd test/cpp/ && ./test_all.sh && popd
