@@ -103,7 +103,10 @@ static inline bool _hclib_atomic_cas_relaxed(_Atomic int *target, int expected, 
 #endif
 
 static inline int _hclib_atomic_load_relaxed(_Atomic int *target) {
-    return *target;
+    __sync_synchronize();
+    int res = *target;
+    __sync_synchronize();
+    return res;
 }
 
 static inline int _hclib_atomic_load_acquire(_Atomic int *target) {
@@ -114,7 +117,9 @@ static inline int _hclib_atomic_load_acquire(_Atomic int *target) {
 }
 
 static inline void _hclib_atomic_store_relaxed(_Atomic int *target, int value) {
+    __sync_synchronize();
     *target = value;
+    __sync_synchronize();
 }
 
 static inline void _hclib_atomic_store_release(_Atomic int *target, int value) {
