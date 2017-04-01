@@ -15,6 +15,7 @@ before_install:
 - export CC=${TRAVIS_CC:-$CC} && $CC --version
 - export CXX=${TRAVIS_CXX:-$CXX} && $CXX --version
 - sudo apt-get update -qq
+- sudo apt-get install gdb
 - sudo apt-get install -y libxml2-dev
 - sudo bash -c 'echo core > /proc/sys/kernel/core_pattern'
 
