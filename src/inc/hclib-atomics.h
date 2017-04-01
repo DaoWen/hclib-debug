@@ -107,6 +107,7 @@ static inline int _hclib_atomic_load_relaxed(_Atomic int *target) {
 }
 
 static inline int _hclib_atomic_load_acquire(_Atomic int *target) {
+    __sync_synchronize();
     int res = *target;
     __sync_synchronize(); // acquire after read
     return res;
@@ -119,6 +120,7 @@ static inline void _hclib_atomic_store_relaxed(_Atomic int *target, int value) {
 static inline void _hclib_atomic_store_release(_Atomic int *target, int value) {
     __sync_synchronize(); // release before write
     *target = value;
+    __sync_synchronize();
 }
 
 static inline int _hclib_atomic_inc_relaxed(_Atomic int *target) {
