@@ -16,6 +16,7 @@ before_install:
 - export CXX=${TRAVIS_CXX:-$CXX} && $CXX --version
 - sudo apt-get update -qq
 - sudo apt-get install -y libxml2-dev
+- sudo echo "core" > /proc/sys/kernel/core_pattern
 
 script:
 - ./install.sh
