@@ -47,6 +47,26 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "hclib.h"
 #include "litectx.h"
 
+/** runtime worker threading strategies */
+#define HCLIB_WORKER_STRATEGY_FIXED    0x01
+#define HCLIB_WORKER_STRATEGY_FIBERS   0x02
+#define HCLIB_WORKER_STRATEGY_THREADS  0x03
+
+/** runtime worker threading options */
+#define HCLIB_WORKER_OPTIONS_HELP_GLOBAL  0x01
+#define HCLIB_WORKER_OPTIONS_HELP_FINISH  0x02
+#define HCLIB_WORKER_OPTIONS_NO_JOIN      0x04
+
+/** default strategy */
+#ifndef HCLIB_WORKER_STRATEGY
+#define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_FIBERS
+#define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_FINISH
+#endif  // HCLIB_WORKER_STRATEGY
+
+#if HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
+#include "fcontext.h"
+#endif /* HCLIB_WORKER_STRATEGY */
+
 #define LOG_LEVEL_FATAL         1
 #define LOG_LEVEL_WARN          2
 #define LOG_LEVEL_INFO          3
@@ -91,6 +111,25 @@ typedef struct hc_options {
      * (one per device) */
     int nworkers; 
 } hc_options;
+
+typedef struct hclib_worker_state {
+        pthread_t t; // the pthread associated
+        struct finish_t* current_finish;
+        struct place_t * pl; // the directly attached place
+        // Path from root to worker's leaf place. Array of places.
+        struct place_t ** hpt_path;
+        struct hc_context * context;
+        // the link of other ws in the same place
+        struct hclib_worker_state * next_worker;
+        struct hc_deque_t * current; // the current deque/place worker is on
+        struct hc_deque_t * deques;
+        int id; // The id, identify a worker
+        int did; // the mapping device id
+#if HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
+        fcontext_state_t *curr_ctx;
+        fcontext_t root_ctx;
+#endif /* HCLIB_WORKER_STRATEGY */
+} hclib_worker_state;
 
 /*
  * Global context information for the HC runtime, shared by all worker threads.

@@ -155,7 +155,7 @@ void spawn_asyncAnyTask(hclib_task_t * task);
 
 template <typename T>
 inline void asyncAny(T lambda) {
-	MARK_OVH(current_ws()->id);
+	MARK_OVH(get_current_worker());
 	hclib_task_t* task = _allocate_async_hcupc<T>(lambda, false);
 	spawn_asyncAnyTask(task);
 }

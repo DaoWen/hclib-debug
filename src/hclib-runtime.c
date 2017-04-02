@@ -491,14 +491,14 @@ void hclib_join(int nb_workers) {
     const int wid = 0;
 #endif /* HCLIB_WORKER_STRATEGY */
     // Join the workers
-    VERBOSE_MSG("hclib_join: nb_workers = %d\n", nb_workers);
+    LOG_DEBUG("hclib_join: nb_workers = %d\n", nb_workers);
     for (int i = 0; i < nb_workers; i++) {
         if (i != wid) {
             pthread_join(hclib_context->workers[i]->t, NULL);
         }
     }
 #endif // HCLIB_WORKER_OPTIONS_NO_JOIN
-    VERBOSE_MSG("hclib_join: finished\n");
+    LOG_DEBUG("hclib_join: finished\n");
 }
 
 void hclib_cleanup() {
@@ -521,7 +521,7 @@ static inline void execute_task(hclib_task_t *task) {
     CURRENT_WS_INTERNAL->current_finish = current_finish;
 
     // task->_fp is of type 'void (*generic_frame_ptr)(void*)'
-    VERBOSE_MSG("execute_task: task=%p fp=%p\n", task, task->_fp);
+    LOG_DEBUG("execute_task: task=%p fp=%p\n", task, task->_fp);
     (task->_fp)(task->args);
     check_out_finish(current_finish);
     free(task);
@@ -529,7 +529,7 @@ static inline void execute_task(hclib_task_t *task) {
 
 static inline void rt_schedule_async(hclib_task_t *async_task, int comm_task,
                                      int gpu_task, hclib_worker_state *ws) {
-    VERBOSE_MSG("rt_schedule_async: async_task=%p comm_task=%d "
+    LOG_DEBUG("rt_schedule_async: async_task=%p comm_task=%d "
             "gpu_task=%d place=%p\n", async_task, comm_task, gpu_task,
             async_task->place);
 
@@ -553,7 +553,7 @@ static inline void rt_schedule_async(hclib_task_t *async_task, int comm_task,
             deque_push_place(ws, async_task->place, async_task);
         } else {
             const int wid = get_current_worker();
-            VERBOSE_MSG("rt_schedule_async: scheduling on worker wid=%d "
+            LOG_DEBUG("rt_schedule_async: scheduling on worker wid=%d "
                     "hclib_context=%p\n", wid, hclib_context);
             if (!deque_push(&(hclib_context->workers[wid]->current->deque),
                             async_task)) {
@@ -561,7 +561,7 @@ static inline void rt_schedule_async(hclib_task_t *async_task, int comm_task,
                 printf("WARNING: deque full, local execution\n");
                 execute_task(async_task);
             }
-            VERBOSE_MSG("rt_schedule_async: finished scheduling on worker wid=%d\n",
+            LOG_DEBUG("rt_schedule_async: finished scheduling on worker wid=%d\n",
                     wid);
         }
     }
@@ -576,7 +576,7 @@ static inline void rt_schedule_async(hclib_task_t *async_task, int comm_task,
  * been satisfied.
  */
 static inline int is_eligible_to_schedule(hclib_task_t *async_task) {
-    VERBOSE_MSG("is_eligible_to_schedule: async_task=%p future_list=%p\n",
+    LOG_DEBUG("is_eligible_to_schedule: async_task=%p future_list=%p\n",
             async_task, async_task->future_list);
     if (async_task->future_list != NULL) {
         return register_on_all_promise_dependencies(async_task);
@@ -628,7 +628,7 @@ void spawn_handler(hclib_task_t *task, place_t *pl,
         HASSERT(task->current_finish == NULL);
     }
 
-    VERBOSE_MSG("spawn_handler: task=%p\n", task);
+    LOG_DEBUG("spawn_handler: task=%p\n", task);
 
     try_schedule_async(task, comm, gpu, ws);
 
@@ -885,7 +885,7 @@ static void _help_finish_ctx(LiteCtx *ctx) {
      * the async must ESCAPE, otherwise this finish scope will deadlock on
      * itself).
      */
-    VERBOSE_MSG("_help_finish_ctx: ctx = %p, ctx->arg = %p\n", ctx, ctx->arg);
+    LOG_DEBUG("_help_finish_ctx: ctx = %p, ctx->arg = %p\n", ctx, ctx->arg);
     finish_t *finish = ctx->arg;
     LiteCtx *hclib_finish_ctx = ctx->prev;
 

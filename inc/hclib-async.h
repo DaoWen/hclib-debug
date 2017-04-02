@@ -60,9 +60,9 @@ namespace hclib {
 template<typename T>
 void lambda_wrapper(void *arg) {
     T *lambda = static_cast<T*>(arg);
-    MARK_BUSY(current_ws()->id);
+    MARK_BUSY(get_current_worker());
     (*lambda)(); // !!! May cause a worker-swap !!!
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     delete lambda;
 }
 
@@ -77,9 +77,9 @@ template<typename T>
 void lambda_await_wrapper(void *raw_arg) {
     auto arg = static_cast<lambda_await_args<T>*>(raw_arg);
     delete[] arg->future_list;
-    MARK_BUSY(current_ws()->id);
+    MARK_BUSY(get_current_worker());
     (*arg->lambda)(); // !!! May cause a worker-swap !!!
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     delete arg->lambda;
     delete arg;
 }
@@ -98,9 +98,9 @@ struct LambdaFutureWrapper {
     static void fn(void *raw_arg) {
         auto arg = static_cast<LambdaFutureArgs<T,R>*>(raw_arg);
         delete[] arg->future_list;
-        MARK_BUSY(current_ws()->id);
+        MARK_BUSY(get_current_worker());
         R res = (*arg->lambda)(); // !!! May cause a worker-swap !!!
-        MARK_OVH(current_ws()->id);
+        MARK_OVH(get_current_worker());
         arg->event->put(res);
         delete arg->lambda;
         delete arg;
@@ -111,9 +111,9 @@ struct LambdaFutureWrapper<T, void> {
     static void fn(void *raw_arg) {
         auto arg = static_cast<LambdaFutureArgs<T, void>*>(raw_arg);
         delete[] arg->future_list;
-        MARK_BUSY(current_ws()->id);
+        MARK_BUSY(get_current_worker());
         (*arg->lambda)(); // !!! May cause a worker-swap !!!
-        MARK_OVH(current_ws()->id);
+        MARK_OVH(get_current_worker());
         arg->event->put();
         delete arg->lambda;
         delete arg;
@@ -128,21 +128,21 @@ struct LambdaFutureWrapper<T, void> {
  */
 template <typename T>
 inline void async(T &&lambda) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_async(lambda_wrapper<U>, new U(lambda), nullptr, nullptr, nullptr, 0);
 }
 
 template <typename T>
 inline void async_at_hpt(place_t* pl, T &&lambda) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_async(lambda_wrapper<U>, new U(lambda), nullptr, nullptr, pl, 0);
 }
 
 template <typename T>
 inline void async_await(T &&lambda, hclib_future_t **fs) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_async(lambda_wrapper<U>, new U(lambda), fs, nullptr, nullptr, 0);
 }
@@ -155,7 +155,7 @@ inline hclib_future_t **construct_future_list(Ts... futures) {
 
 template <typename T, typename... future_list_t>
 inline void async_await(T &&lambda, future_list_t... futures) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_future_t **fs = construct_future_list(futures...);
     lambda_await_args<U> *args = new lambda_await_args<U> { new U(lambda), fs };
@@ -165,14 +165,14 @@ inline void async_await(T &&lambda, future_list_t... futures) {
 
 template <typename T>
 inline void async_await_at(T &&lambda, place_t *pl, hclib_future_t **fs) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_async(lambda_wrapper<U>, new U(lambda), fs, nullptr, pl, 0);
 }
 
 template <typename T, typename... future_list_t>
 inline void async_await_at(T &&lambda, place_t *pl, future_list_t... futures) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_future_t **fs = construct_future_list(futures...);
     lambda_await_args<U> *args = new lambda_await_args<U> { new U(lambda), fs };
@@ -182,7 +182,7 @@ inline void async_await_at(T &&lambda, place_t *pl, future_list_t... futures) {
 
 template <typename T>
 inline void async_comm(T &&lambda) {
-    MARK_OVH(current_ws()->id);
+    MARK_OVH(get_current_worker());
     typedef typename std::remove_reference<T>::type U;
     hclib_async(lambda_wrapper<U>, new U(lambda),
             nullptr, nullptr, nullptr, COMM_ASYNC);
