@@ -47,14 +47,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "hclib_common.h"
 
-#if HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
-#include "litectx.h"
-#endif /* HCLIB_WORKER_STRATEGY */
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+// TODO - remove these (unused)
 #define COMMUNICATION_WORKER_ID 1
 #define GPU_WORKER_ID 2
 

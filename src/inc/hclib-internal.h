@@ -45,7 +45,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "hclib-tree.h"
 #include "hclib-deque.h"
 #include "hclib.h"
-#include "litectx.h"
 
 /** runtime worker threading strategies */
 #define HCLIB_WORKER_STRATEGY_FIXED    0x01
