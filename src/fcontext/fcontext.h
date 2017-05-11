@@ -67,6 +67,9 @@ typedef struct {
 // fcontext_fn_t is the type-signature for an entry-point function of a fiber.
 typedef void (*fcontext_fn_t)(fcontext_transfer_t);
 
+// fcontext_ontop_fn_t is the type-signature for an ontop_fcontext call
+typedef fcontext_transfer_t (*fcontext_ontop_fn_t)(fcontext_transfer_t);
+
 typedef struct {
     fcontext_t context;
     uint8_t stack[];
@@ -89,7 +92,7 @@ extern fcontext_t make_fcontext(void *sp, size_t size, fcontext_fn_t fn);
 
 // Prototype for native jump_fcontext routine from Boost.Context
 extern fcontext_transfer_t ontop_fcontext(fcontext_t const to, void *vp,
-                                          fcontext_fn_t fn);
+                                          fcontext_ontop_fn_t fn);
 
 /**
  * Create a new fiber context that will use entry_fn as its entry point.
@@ -155,7 +158,7 @@ static inline fcontext_transfer_t fcontext_swap(fcontext_t next, void *arg) {
  * to the original `base` context.
  */
 static inline fcontext_transfer_t fcontext_run_on(fcontext_t base, void *arg,
-                                                  fcontext_fn_t fn) {
+                                                  fcontext_ontop_fn_t fn) {
     return ontop_fcontext(base, arg, fn);
 }
 
