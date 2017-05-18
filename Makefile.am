@@ -1,6 +1,9 @@
 
 SUBDIRS = src
 
+# Don't clobber our custom header template
+AUTOHEADER = echo autoheader disabled
+
 AUX_DIST = \
 	$(ac_aux_dir)/config.guess		\
 	$(ac_aux_dir)/config.sub		\

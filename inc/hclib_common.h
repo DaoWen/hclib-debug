@@ -49,16 +49,17 @@
 /** runtime worker threading options */
 #define HCLIB_WORKER_OPTIONS_HELP_GLOBAL  0x01
 #define HCLIB_WORKER_OPTIONS_HELP_FINISH  0x02
+#define HCLIB_WORKER_OPTIONS_NO_JOIN      0x04
 
 /** default strategy */
 #ifndef HCLIB_WORKER_STRATEGY
-#if 0
+#if 0 // Use fixed thread pool strategy
 #define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_FIXED
 #define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_GLOBAL
-#elif 0
+#elif 1 // Use thread-spawning strategy
 #define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_THREADS
 #define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_FINISH
-#else
+#else // Use fiber-spawning strategy
 #define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_FIBERS
 #define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_FINISH
 #endif

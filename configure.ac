@@ -108,6 +108,22 @@ fi
 CXXFLAGS="${_old_CXXFLAGS}"
 ### End C++11 features check
 
+### Check for HClib worker strategy settings
+AC_ARG_VAR([HCLIB_SET_WORKER_STRATEGY], [HClib worker strategy])
+AM_CONDITIONAL([HAS_HCLIB_WORKER_STRATEGY],
+               [test "x$HCLIB_SET_WORKER_STRATEGY" != "x"])
+AM_COND_IF([HAS_HCLIB_WORKER_STRATEGY],
+           [AC_MSG_NOTICE([HCLIB_SET_WORKER_STRATEGY=$HCLIB_SET_WORKER_STRATEGY])],
+           [AC_MSG_NOTICE([HCLIB_SET_WORKER_STRATEGY not set])])
+
+AC_ARG_VAR([HCLIB_SET_WORKER_OPTIONS], [HClib worker strategy options])
+AM_CONDITIONAL([HAS_HCLIB_WORKER_OPTIONS],
+               [test "x$HCLIB_SET_WORKER_OPTIONS" != "x"])
+AM_COND_IF([HAS_HCLIB_WORKER_OPTIONS],
+           [AC_MSG_NOTICE([HCLIB_SET_WORKER_OPTIONS=$HCLIB_SET_WORKER_OPTIONS])],
+           [AC_MSG_NOTICE([HCLIB_SET_WORKER_OPTIONS not set])])
+### END Check for HClib worker strategy settings
+
 # Variable substitutions.
 AC_SUBST([ac_aux_dir])
 AC_SUBST([abs_top_srcdir])

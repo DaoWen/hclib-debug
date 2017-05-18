@@ -14,14 +14,18 @@
  * limitations under the License.
  */
 
+#ifndef HCLIB_RT_H_
+#define HCLIB_RT_H_
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <assert.h>
-#include "litectx.h"
+#include <stdbool.h>
 
-#ifndef HCLIB_RT_H_
-#define HCLIB_RT_H_
+#include "hclib_common.h"
+
+#include "litectx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,17 +62,30 @@ typedef struct hclib_worker_state {
 #define _HCLIB_MACRO_CONCAT_IMPL(x, y) x ## y
 
 #ifdef HC_ASSERTION_CHECK
-#define HASSERT(cond) { \
-    if (!(cond)) { \
-        fprintf(stderr, "W%d: assertion failure\n", get_current_worker()); \
-        assert(cond); \
-    } \
-}
+#define HC_ASSERTION_CHECK_ENABLED 1
 #else
-#define HASSERT(cond)       // Do Nothing
+#define HC_ASSERTION_CHECK_ENABLED 0
 #endif
 
-#if __cplusplus // C++11 static assert
+#define HASSERT(cond) do { \
+    if (HC_ASSERTION_CHECK_ENABLED) { \
+        if (!(cond)) { \
+            fprintf(stderr, "W%d: assertion failure\n", get_current_worker()); \
+            assert(cond); \
+        } \
+    } \
+} while (0)
+
+#define HCHECK(expr) do { \
+    int _hclib_check_rt_failed = (expr) != 0; \
+    if (HC_ASSERTION_CHECK_ENABLED && _hclib_check_rt_failed) { \
+        fprintf(stderr, "W%d: Non-zero return value (%d) from:\n\t%s\n", \
+                get_current_worker(), _hclib_check_rt_failed, #expr); \
+        abort(); \
+    } \
+} while (0);
+
+#if defined(static_assert) || __cplusplus >= 201103L // defined in C11, C++11
 #define HASSERT_STATIC static_assert
 #else // C11 static assert
 #define HASSERT_STATIC _Static_assert
