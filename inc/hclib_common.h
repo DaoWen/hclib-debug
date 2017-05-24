@@ -18,6 +18,7 @@
 #define HCLIB_COMMON_H_
 
 #include "hclib_config.h"
+#include "hclib-worker-config.h"
 
 /*
  * Default async arguments
@@ -40,7 +41,29 @@
 /** @brief No accumulator argument provided. */
 #define NO_ACCUM NULL
 
-#define HCLIB_LITECTX_STRATEGY 1
+/** runtime worker threading strategies */
+#define HCLIB_WORKER_STRATEGY_FIXED    0x01
+#define HCLIB_WORKER_STRATEGY_FIBERS   0x02
+#define HCLIB_WORKER_STRATEGY_THREADS  0x03
+
+/** runtime worker threading options */
+#define HCLIB_WORKER_OPTIONS_HELP_GLOBAL  0x01
+#define HCLIB_WORKER_OPTIONS_HELP_FINISH  0x02
+
+/** default strategy */
+#ifndef HCLIB_WORKER_STRATEGY
+#if 0
+#define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_FIXED
+#define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_GLOBAL
+#elif 0
+#define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_THREADS
+#define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_FINISH
+#else
+#define HCLIB_WORKER_STRATEGY  HCLIB_WORKER_STRATEGY_FIBERS
+#define HCLIB_WORKER_OPTIONS   HCLIB_WORKER_OPTIONS_HELP_FINISH
+#endif
+#endif  // HCLIB_WORKER_STRATEGY
+
 // #define VERBOSE 1
 
 #endif
