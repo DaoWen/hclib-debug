@@ -57,16 +57,26 @@ typedef struct hclib_worker_state {
 #define HCLIB_MACRO_CONCAT(x, y) _HCLIB_MACRO_CONCAT_IMPL(x, y)
 #define _HCLIB_MACRO_CONCAT_IMPL(x, y) x ## y
 
-#ifdef HC_ASSERTION_CHECK
-#define HASSERT(cond) { \
-    if (!(cond)) { \
-        fprintf(stderr, "W%d: assertion failure\n", get_current_worker()); \
-        assert(cond); \
-    } \
-}
+#ifdef HCLIB_DEBUG
+#define HC_DEBUG_ENABLED 1
 #else
-#define HASSERT(cond)       // Do Nothing
+#define HC_DEBUG_ENABLED 0
 #endif
+
+#ifdef HC_ASSERTION_CHECK
+#define HC_ASSERTION_CHECK_ENABLED 1
+#else
+#define HC_ASSERTION_CHECK_ENABLED 0
+#endif
+
+#define HASSERT(cond) do { \
+    if (HC_ASSERTION_CHECK_ENABLED) { \
+        if (!(cond)) { \
+            fprintf(stderr, "W%d: assertion failure\n", get_current_worker()); \
+            assert(cond); \
+        } \
+    } \
+} while (0)
 
 #if __cplusplus // C++11 static assert
 #define HASSERT_STATIC static_assert
