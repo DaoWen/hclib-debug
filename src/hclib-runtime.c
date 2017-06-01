@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-#include <pthread.h>
-#include <sys/time.h>
-#include <stddef.h>
+// We require at least POSIX 1995 for the nanosleep function
+#if !(_POSIX_C_SOURCE >= 199506L)
+#define _POSIX_C_SOURCE 199506L
+#endif
 
 #include <hclib.h>
 #include <hclib-internal.h>
@@ -24,15 +25,31 @@
 #include <hclib-finish.h>
 #include <hclib-hpt.h>
 
+// These includes must come AFTER hclib-internal.h
+// to ensure that the hclib_config.h settings are included.
+#include <pthread.h>
+#include <sys/time.h>
+#include <stddef.h>
+#include <time.h>
+
+#define HCLIB_DO_THREAD_COUNTING \
+    ((HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS) \
+     || (HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_NO_JOIN))
+
 static double benchmark_start_time_stats = 0;
 static double user_specified_timer = 0;
 // TODO use __thread on Linux?
 pthread_key_t ws_key;
 
+static _Atomic int _hclib_finished_workers;
+
 hc_context *hclib_context = NULL;
 
 static char *hclib_stats = NULL;
 static int bind_threads = -1;
+
+static int64_t _hclib_worker_strategy_val = HCLIB_DEFAULT_WORKER_STRATEGY;
+static int64_t _hclib_worker_options_val = HCLIB_DEFAULT_WORKER_OPTIONS;
 
 void hclib_start_finish();
 
@@ -57,6 +74,7 @@ int total_push_outd;
 int *total_push_ind;
 int *total_steals;
 
+#ifdef HC_COMM_WORKER_STATS
 static inline void increment_async_counter(int wid) {
     total_push_ind[wid]++;
 }
@@ -64,6 +82,7 @@ static inline void increment_async_counter(int wid) {
 static inline void increment_steals_counter(int wid) {
     total_steals[wid]++;
 }
+#endif
 
 void set_current_worker(int wid) {
     if (pthread_setspecific(ws_key, hclib_context->workers[wid]) != 0) {
@@ -79,21 +98,66 @@ int get_current_worker() {
     return ((hclib_worker_state *)pthread_getspecific(ws_key))->id;
 }
 
-static void set_curr_lite_ctx(LiteCtx *ctx) {
-    CURRENT_WS_INTERNAL->curr_ctx = ctx;
+static inline void check_in_finish(finish_t *finish) {
+    if (finish) {
+        // FIXME - does this need to be acquire, or can it be relaxed?
+        _hclib_atomic_inc_acquire(&finish->counter);
+    }
 }
 
-static LiteCtx *get_curr_lite_ctx() {
+static inline void check_out_finish(finish_t *finish) {
+    if (finish) {
+        // was this the last async to check out?
+        if (_hclib_atomic_dec_release(&finish->counter) == 0) {
+            if (finish->finish_deps) {
+                // trigger non-blocking finish or suspended fiber
+                HASSERT(!_hclib_promise_is_satisfied(finish->finish_deps[0]->owner));
+                hclib_promise_put(finish->finish_deps[0]->owner, finish);
+            }
+        }
+    }
+}
+
+hclib_worker_state * __attribute__ ((noinline)) get_current_ws(void) {
+    return ((hclib_worker_state *)pthread_getspecific(ws_key));
+}
+
+static inline void _set_curr_fiber(fcontext_state_t *ctx) {
+    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+    if (!ws) {
+        int tries = 0;
+        do {
+            ws = get_current_ws();
+        } while (!ws && ++tries < 100000);
+        fprintf(stderr, "get-ws tries=%d\n", tries);
+    }
+    ws->curr_ctx = ctx;
+}
+
+static inline fcontext_state_t *_get_curr_fiber() {
     return CURRENT_WS_INTERNAL->curr_ctx;
 }
 
-static __inline__ void ctx_swap(LiteCtx *current, LiteCtx *next,
-                                const char *lbl) {
+static inline _Noreturn void _fiber_exit(fcontext_state_t *current,
+                                         fcontext_t next) {
+    fcontext_swap(next, current);
+    HC_UNREACHABLE;
+}
+
+static __inline__ void _fiber_suspend(fcontext_state_t *current,
+                                      fcontext_fn_t transfer_fn,
+                                      void *arg) {
     // switching to new context
-    set_curr_lite_ctx(next);
-    LiteCtx_swap(current, next, lbl);
+    fcontext_state_t *fresh_fiber = fcontext_create(transfer_fn);
+    _set_curr_fiber(fresh_fiber);
+    fcontext_transfer_t swap_data = fcontext_swap(fresh_fiber->context, arg);
     // switched back to this context
-    set_curr_lite_ctx(current);
+    _set_curr_fiber(current);
+    // destroy the context that resumed this one since it's now defunct
+    // (there are no other handles to it, and it will never be resumed)
+    // (NOTE: fresh_fiber might differ from prev_fiber)
+    fcontext_state_t *prev_fiber = swap_data.data;
+    fcontext_destroy(prev_fiber);
 }
 
 hclib_worker_state *current_ws() {
@@ -102,6 +166,113 @@ hclib_worker_state *current_ws() {
 
 // FWD declaration for pthread_create
 static void *worker_routine(void *args);
+
+typedef struct {
+    volatile int val;
+    volatile pthread_t other;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} hclib_worker_wait_state;
+
+static void _finish_ctx_trigger(void *args) {
+    // terminating this thread
+    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+
+    // wake up the suspended thread
+    hclib_worker_wait_state *wait_state = args;
+    HCHECK(pthread_mutex_lock(&wait_state->lock));
+    wait_state->other = pthread_self();
+    wait_state->val = ws->id;
+    HCHECK(pthread_cond_signal(&wait_state->cond));
+    HCHECK(pthread_mutex_unlock(&wait_state->lock));
+
+    // exit, and the woken thread will join this thread
+    // (returns the wait_state address as a sanity check)
+    pthread_exit(wait_state);
+}
+
+static void _swap_blocked_thread(finish_t *finish, hclib_future_t *future) {
+    HASSERT(future);
+
+    // set up future deps list
+    hclib_future_t *async_deps[] = { future, NULL };
+
+    if (finish) {
+        finish->finish_deps = async_deps;
+    }
+
+    // cache current thread info
+    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+
+    // set up condition variable for suspending this thread
+    hclib_worker_wait_state wait_state;
+    wait_state.val = -1;
+    HCHECK(pthread_mutex_init(&wait_state.lock, NULL));
+    HCHECK(pthread_cond_init(&wait_state.cond, NULL));
+
+    const bool no_worker_join = HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_NO_JOIN;
+
+    // suspend (and yield to new thread)
+    {
+        // Create an async to handle the continuation after the finish, whose state
+        // is captured in wait_state and whose execution is pending on async_deps.
+        hclib_async(_finish_ctx_trigger, &wait_state, async_deps,
+                NO_PHASER, ANY_PLACE, ESCAPING_ASYNC);
+
+        // This thread is done with this finish
+        check_out_finish(finish);
+
+        // Start workers
+
+        pthread_attr_t attr;
+        if (no_worker_join) {
+            HCHECK(pthread_attr_init(&attr));
+            HCHECK(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
+        }
+
+        const pthread_attr_t *attr_ptr = no_worker_join ? &attr : NULL;
+
+        // TODO - make option for creating the new thread only if some
+        // percentage of the total workers are currently busy
+        pthread_t new_thread;
+        HCHECK(pthread_create(&new_thread, attr_ptr, worker_routine, &ws->id));
+
+        HCHECK(pthread_mutex_lock(&wait_state.lock));
+
+        while (wait_state.val < 0) {
+            HCHECK(pthread_cond_wait(&wait_state.cond, &wait_state.lock));
+        }
+
+        HCHECK(pthread_mutex_unlock(&wait_state.lock));
+    }
+
+    // reset current worker context
+    // (context may have swapped)
+    set_current_worker(wait_state.val);
+    ws = CURRENT_WS_INTERNAL;
+
+    if (!no_worker_join) {
+        // join the killed thread
+        void *output_ptr;
+        HCHECK(pthread_join(wait_state.other, &output_ptr));
+
+        // sanity check return value from _finish_ctx_trigger
+        if (output_ptr != &wait_state) {
+            fprintf(stderr, "FAIL: %p vs %p\n", output_ptr, &wait_state);
+            HASSERT(output_ptr == &wait_state);
+        }
+    }
+
+    // clean up
+    HCHECK(pthread_mutex_destroy(&wait_state.lock));
+    HCHECK(pthread_cond_destroy(&wait_state.cond));
+}
+
+static void _swap_finish_thread(finish_t *finish) {
+    hclib_promise_t finish_promise;
+    hclib_promise_init(&finish_promise);
+    _swap_blocked_thread(finish, &finish_promise.future);
+}
 
 /*
  * Main initialization function for the hclib_context object.
@@ -116,8 +287,10 @@ void hclib_global_init() {
         hclib_worker_state *ws = hclib_context->workers[i];
         ws->context = hclib_context;
         ws->current_finish = NULL;
-        ws->curr_ctx = NULL;
-        ws->root_ctx = NULL;
+        if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS) {
+            ws->curr_ctx = NULL;
+            ws->root_ctx = NULL;
+        }
     }
     hclib_context->done_flags = (worker_done_t *)malloc(
                                     hclib_context->nworkers * sizeof(worker_done_t));
@@ -155,7 +328,7 @@ void hclib_entrypoint() {
         hclib_display_runtime();
     }
 
-    srand(0);
+    srand(0);  // XXX - why is this here?
 
     hclib_context = (hc_context *)malloc(sizeof(hc_context));
     HASSERT(hclib_context);
@@ -182,18 +355,25 @@ void hclib_entrypoint() {
 
     // Start workers
     pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0) {
-        fprintf(stderr, "Error in pthread_attr_init\n");
-        exit(3);
+    HCHECK(pthread_attr_init(&attr));
+
+    if (HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_NO_JOIN) {
+        HCHECK(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
     }
 
     for (int i = 1; i < hclib_context->nworkers; i++) {
-        if (pthread_create(&hclib_context->workers[i]->t, &attr, worker_routine,
+        pthread_t other;
+        if (pthread_create(&other, &attr, worker_routine,
                            &hclib_context->workers[i]->id) != 0) {
             fprintf(stderr, "Error launching thread\n");
             exit(4);
         }
+
+        hclib_context->workers[i]->t = other;
     }
+
+    hclib_context->workers[0]->t = pthread_self();
+
     set_current_worker(0);
 
     // allocate root finish
@@ -208,10 +388,32 @@ void hclib_signal_join(int nb_workers) {
 }
 
 void hclib_join(int nb_workers) {
-    // Join the workers
-    LOG_DEBUG("hclib_join: nb_workers = %d\n", nb_workers);
-    for (int i = 1; i < nb_workers; i++) {
-        pthread_join(hclib_context->workers[i]->t, NULL);
+    if (HCLIB_DO_THREAD_COUNTING) {
+        _hclib_atomic_inc_release(&_hclib_finished_workers);
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 1000000L };
+        while (_hclib_atomic_load_acquire(&_hclib_finished_workers) < nb_workers) {
+            nanosleep(&delay, NULL);
+        }
+    }
+    if (HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_NO_JOIN) {
+        // Don't need to join the other threads
+    }
+    else {
+        // The worker ID for the master worker can change from zero
+        // when using a non-fixed thread pool strategy
+        const int wid = (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS)
+            ? CURRENT_WS_INTERNAL->id : 0;
+        // Join the workers
+        LOG_DEBUG("hclib_join: nb_workers = %d\n", nb_workers);
+        for (int i = 0; i < nb_workers; i++) {
+            if (i != wid) {
+                pthread_t other;
+                while (!(other = hclib_context->workers[i]->t)) {
+                    // spin wait
+                }
+                pthread_join(other, NULL);
+            }
+        }
     }
     LOG_DEBUG("hclib_join: finished\n");
 }
@@ -223,25 +425,6 @@ void hclib_cleanup() {
     free(hclib_context);
     free(total_steals);
     free(total_push_ind);
-}
-
-static inline void check_in_finish(finish_t *finish) {
-    if (finish) {
-        // FIXME - does this need to be acquire, or can it be relaxed?
-        _hclib_atomic_inc_acquire(&finish->counter);
-    }
-}
-
-static inline void check_out_finish(finish_t *finish) {
-    if (finish) {
-        // was this the last async to check out?
-        if (_hclib_atomic_dec_release(&finish->counter) == 0) {
-#if HCLIB_LITECTX_STRATEGY
-            HASSERT(!_hclib_promise_is_satisfied(finish->finish_deps[0]->owner));
-            hclib_promise_put(finish->finish_deps[0]->owner, finish);
-#endif /* HCLIB_LITECTX_STRATEGY */
-        }
-    }
 }
 
 static inline void execute_task(hclib_task_t *task) {
@@ -369,37 +552,47 @@ void spawn_await(hclib_task_t *task, hclib_future_t **future_list) {
     spawn_await_at(task, future_list, NULL);
 }
 
-void find_and_run_task(hclib_worker_state *ws) {
+static inline bool _try_run_local(hclib_worker_state *ws) {
+    // try to pop
     hclib_task_t *task = hpt_pop_task(ws);
-    if (!task) {
-        while (hclib_context->done_flags[ws->id].flag) {
-            // try to steal
-            task = hpt_steal_task(ws);
-            if (task) {
-#ifdef HC_COMM_WORKER_STATS
-                increment_steals_counter(ws->id);
-#endif
-                break;
-            }
-        }
-    }
-
     if (task) {
         execute_task(task);
     }
+    return task;
 }
 
-#if HCLIB_LITECTX_STRATEGY
-static void _hclib_finalize_ctx(LiteCtx *ctx) {
+static inline bool _try_run_global(hclib_worker_state *ws) {
+    // try to steal
+    hclib_task_t *task = hpt_steal_task(ws);
+    if (task) {
+#ifdef HC_COMM_WORKER_STATS
+        increment_steals_counter(ws->id);
+#endif
+        execute_task(task);
+    }
+    return task;
+}
+
+void find_and_run_task(hclib_worker_state *ws) {
+    if (!_try_run_local(ws)) {
+        while (hclib_context->done_flags[ws->id].flag) {
+            // try to steal
+            _try_run_global(ws);
+        }
+    }
+}
+
+static void _hclib_finalize_ctx(fcontext_transfer_t fiber_data) {
+    CURRENT_WS_INTERNAL->root_ctx = fiber_data.prev_context;
     hclib_end_finish();
     // Signal shutdown to all worker threads
     hclib_signal_join(hclib_context->nworkers);
     // Jump back to the system thread context for this worker
-    ctx_swap(ctx, CURRENT_WS_INTERNAL->root_ctx, __func__);
-    HASSERT(0); // Should never return here
+    _fiber_exit(_get_curr_fiber(), CURRENT_WS_INTERNAL->root_ctx);
+    HC_UNREACHABLE; // Should never return here
 }
 
-static void core_work_loop(void) {
+static _Noreturn void core_work_loop(void) {
     uint64_t wid;
     do {
         hclib_worker_state *ws = CURRENT_WS_INTERNAL;
@@ -408,128 +601,144 @@ static void core_work_loop(void) {
     } while (hclib_context->done_flags[wid].flag);
 
     // Jump back to the system thread context for this worker
-    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
-    HASSERT(ws->root_ctx);
-    ctx_swap(get_curr_lite_ctx(), ws->root_ctx, __func__);
-    HASSERT(0); // Should never return here
+    _fiber_exit(_get_curr_fiber(), CURRENT_WS_INTERNAL->root_ctx);
+    HC_UNREACHABLE; // Should never return here
 }
 
-static void crt_work_loop(LiteCtx *ctx) {
+static _Noreturn void crt_work_loop(fcontext_transfer_t fiber_data) {
+    CURRENT_WS_INTERNAL->root_ctx = fiber_data.prev_context;
     core_work_loop(); // this function never returns
-    HASSERT(0); // Should never return here
+    HC_UNREACHABLE; // Should never return here
 }
-
-/*
- * With the addition of lightweight context switching, worker creation becomes a
- * bit more complicated because we need all task creation and finish scopes to
- * be performed from beneath an explicitly created context, rather than from a
- * pthread context. To do this, we start worker_routine by creating a proxy
- * context to switch from and create a lightweight context to switch to, which
- * enters crt_work_loop immediately, moving into the main work loop, eventually
- * swapping back to the proxy task
- * to clean up this worker thread when the worker thread is signaled to exit.
- */
-static void *worker_routine(void *args) {
-    const int wid = *((int *)args);
-    set_current_worker(wid);
-    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
-
-    // Create proxy original context to switch from
-    LiteCtx *currentCtx = LiteCtx_proxy_create(__func__);
-    ws->root_ctx = currentCtx;
-
-    /*
-     * Create the new proxy we will be switching to, which will start with
-     * crt_work_loop at the top of the stack.
-     */
-    LiteCtx *newCtx = LiteCtx_create(crt_work_loop);
-    newCtx->arg = args;
-
-    // Swap in the newCtx lite context
-    ctx_swap(currentCtx, newCtx, __func__);
-
-    LOG_DEBUG("worker_routine: worker %d exiting, cleaning up proxy %p "
-            "and lite ctx %p\n", get_current_worker(), currentCtx, newCtx);
-
-    // free resources
-    LiteCtx_destroy(currentCtx->prev);
-    LiteCtx_proxy_destroy(currentCtx);
-    return NULL;
-}
-
-#else /* default (broken) strategy */
 
 static void *worker_routine(void *args) {
     const int wid = *((int *) args);
     set_current_worker(wid);
 
-    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+    // With the addition of lightweight context switching, worker creation
+    // becomes a bit more complicated because we need all task creation and
+    // finish scopes to be performed from beneath an explicitly created
+    // context, rather than from a pthread context. To do this, we start
+    // worker_routine by creating a proxy context to switch from and create
+    // a lightweight context to switch to, which enters crt_work_loop
+    // immediately, moving into the main work loop, eventually swapping
+    // back to the proxy task to clean up this worker thread when the
+    // worker thread is signaled to exit.
+    if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS) {
+         // Create the new fiber we will be switching to,
+         // which will start with crt_work_loop at the top of the stack.
+        _fiber_suspend(NULL, crt_work_loop, NULL);
+    }
 
-    while (hclib_context->done_flags[wid].flag) {
-        find_and_run_task(ws);
+    else {
+        hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+
+        do {
+            find_and_run_task(ws);
+
+            if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS) {
+                // context may have swapped
+                ws = CURRENT_WS_INTERNAL;
+            }
+        } while (hclib_context->done_flags[ws->id].flag);
+    }
+
+    if (HCLIB_DO_THREAD_COUNTING) {
+        // context may have swapped
+        CURRENT_WS_INTERNAL->t = pthread_self();
+        _hclib_atomic_inc_release(&_hclib_finished_workers);
     }
 
     return NULL;
 }
-#endif /* HCLIB_LITECTX_STRATEGY */
 
-#if HCLIB_LITECTX_STRATEGY
 static void _finish_ctx_resume(void *arg) {
-    LiteCtx *currentCtx = get_curr_lite_ctx();
-    LiteCtx *finishCtx = arg;
-    ctx_swap(currentCtx, finishCtx, __func__);
-
-    LOG_DEBUG("Should not have reached here, currentCtx=%p "
-            "finishCtx=%p\n", currentCtx, finishCtx);
-    HASSERT(0);
+    fcontext_t finishCtx = arg;
+    _fiber_exit(_get_curr_fiber(), finishCtx);
+    HC_UNREACHABLE;
 }
 
 // Based on _help_finish_ctx
-void _help_wait(LiteCtx *ctx) {
-    hclib_future_t **continuation_deps = ctx->arg;
-    LiteCtx *wait_ctx = ctx->prev;
+static void _help_wait(fcontext_transfer_t fiber_data) {
+    hclib_future_t **continuation_deps = fiber_data.data;
+    fcontext_t wait_ctx = fiber_data.prev_context;
 
     // reusing _finish_ctx_resume
     hclib_async(_finish_ctx_resume, wait_ctx, continuation_deps,
             NO_PHASER, ANY_PLACE, ESCAPING_ASYNC);
 
     core_work_loop();
-    HASSERT(0);
+    HC_UNREACHABLE;
 }
 
 void *hclib_future_wait(hclib_future_t *future) {
+
     if (_hclib_promise_is_satisfied(future->owner)) {
         return future->owner->datum;
     }
 
-    // save current finish scope (in case of worker swap)
-    finish_t *current_finish = CURRENT_WS_INTERNAL->current_finish;
+    if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
+            || HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS) {
+        // save current finish scope (in case of worker swap)
+        finish_t *current_finish = CURRENT_WS_INTERNAL->current_finish;
 
-    hclib_future_t *continuation_deps[] = { future, NULL };
-    LiteCtx *currentCtx = get_curr_lite_ctx();
-    HASSERT(currentCtx);
-    LiteCtx *newCtx = LiteCtx_create(_help_wait);
-    newCtx->arg = continuation_deps;
-    ctx_swap(currentCtx, newCtx, __func__);
-    LiteCtx_destroy(currentCtx->prev);
+        if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS) {
+            hclib_future_t *continuation_deps[] = { future, NULL };
+            _fiber_suspend(_get_curr_fiber(), _help_wait, continuation_deps);
+        }
+        else {
+            HASSERT(HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS);
+            _swap_blocked_thread(NULL, future);
+        }
 
-    // restore current finish scope (in case of worker swap)
-    CURRENT_WS_INTERNAL->current_finish = current_finish;
+        // restore current finish scope (in case of worker swap)
+        CURRENT_WS_INTERNAL->current_finish = current_finish;
+    }
+
+    else {
+        HASSERT(HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIXED);
+
+        if (HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_HELP_GLOBAL) {
+            hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+            // save current finish scope (in case of worker swap)
+            finish_t *current_finish = ws->current_finish;
+
+            while (!_hclib_promise_is_satisfied(future->owner)) {
+                if (!_try_run_local(ws)) {
+                    while (!_hclib_promise_is_satisfied(future->owner)) {
+                        _try_run_global(ws);
+                    }
+                    break;
+                }
+            }
+
+            // restore current finish scope (in case of worker swap)
+            CURRENT_WS_INTERNAL->current_finish = current_finish;
+        }
+        else {
+            while (!_hclib_promise_is_satisfied(future->owner)) {
+                // spin-wait
+            }
+        }
+
+    }
 
     HASSERT(_hclib_promise_is_satisfied(future->owner) &&
             "promise must be satisfied before returning from wait");
+
     return future->owner->datum;
 }
 
-static void _help_finish_ctx(LiteCtx *ctx) {
+static void _help_finish_ctx(fcontext_transfer_t fiber_data) {
     /*
      * Set up previous context to be stolen when the finish completes (note that
      * the async must ESCAPE, otherwise this finish scope will deadlock on
      * itself).
      */
-    LOG_DEBUG("_help_finish_ctx: ctx = %p, ctx->arg = %p\n", ctx, ctx->arg);
-    finish_t *finish = ctx->arg;
-    LiteCtx *hclib_finish_ctx = ctx->prev;
+    finish_t *finish = fiber_data.data;
+    fcontext_t hclib_finish_ctx = fiber_data.prev_context;
+    LOG_DEBUG("_help_finish_ctx: ctx = %p, ctx->arg = %p\n",
+              hclib_finish_ctx, finish);
 
     /*
      * Create an async to handle the continuation after the finish, whose state
@@ -547,61 +756,11 @@ static void _help_finish_ctx(LiteCtx *ctx) {
 
     // keep work-stealing until this context gets swapped out and destroyed
     core_work_loop(); // this function never returns
-    HASSERT(0); // we should never return here
-}
-#else /* default (broken) strategy */
-
-static inline void slave_worker_finishHelper_routine(finish_t *finish) {
-    hclib_worker_state *ws = CURRENT_WS_INTERNAL;
-#ifdef HC_COMM_WORKER_STATS
-    const int wid = ws->id;
-#endif
-
-    while (_hclib_atomic_load_relaxed(&finish->counter) > 0) {
-        // try to pop
-        hclib_task_t *task = hpt_pop_task(ws);
-        if (!task) {
-            while (_hclib_atomic_load_relaxed(&finish->counter) > 0) {
-                // try to steal
-                task = hpt_steal_task(ws);
-                if (task) {
-#ifdef HC_COMM_WORKER_STATS
-                    increment_steals_counter(wid);
-#endif
-                    break;
-                }
-            }
-        }
-        if (task) {
-            execute_task(task);
-        }
-    }
+    HC_UNREACHABLE; // we should never return here
 }
 
-static void _help_finish(finish_t *finish) {
-    slave_worker_finishHelper_routine(finish);
-}
-
-#endif /* HCLIB_???_STRATEGY */
-
-void help_finish(finish_t *finish) {
-    // This is called to make progress when an end_finish has been
-    // reached but it hasn't completed yet.
-    // Note that's also where the master worker ends up entering its work loop
-
-#if HCLIB_THREAD_BLOCKING_STRATEGY
-#error Thread-blocking strategy is not yet implemented
-#elif HCLIB_LITECTX_STRATEGY
-    {
-        /*
-         * Creating a new context to switch to is necessary here because the
-         * current context needs to become the continuation for this finish
-         * (which will be switched back to by _finish_ctx_resume, for which an
-         * async is created inside _help_finish_ctx).
-         */
-
-        // TODO - should only switch contexts after actually finding work
-
+static inline void _worker_finish_help(finish_t *finish) {
+    if ((HCLIB_WORKER_OPTIONS) & HCLIB_WORKER_OPTIONS_HELP_FINISH) {
         // Try to execute a sub-task of the current finish scope
         do {
             hclib_worker_state *ws = CURRENT_WS_INTERNAL;
@@ -625,31 +784,48 @@ void help_finish(finish_t *finish) {
                 deque_push_place(ws, NULL, task);
                 break;
             }
-        } while (_hclib_atomic_load_relaxed(&finish->counter) > 1);
+        } while (finish->counter > 1);
+    }
+}
 
-        // Someone stole our last task...
-        // Create a new context to do other work,
-        // and suspend this finish scope pending on the outstanding tasks.
+
+void help_finish(finish_t *finish) {
+    // This is called to make progress when an end_finish has been
+    // reached but it hasn't completed yet.
+    // Note that's also where the master worker ends up entering its work loop
+
+    // Try helping the current finish scope first
+    // (internally checks if this option is enabled)
+    _worker_finish_help(finish);
+
+    if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS
+            || HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS) {
+        /*
+         * Creating a new context to switch to is necessary here because the
+         * current context needs to become the continuation for this finish
+         * (which will be switched back to by _finish_ctx_resume, for which an
+         * async is created inside _help_finish_ctx).
+         */
+
         if (_hclib_atomic_load_relaxed(&finish->counter) > 1) {
-            // create finish event
-            hclib_promise_t *finish_promise = hclib_promise_create();
-            hclib_future_t *finish_deps[] = { &finish_promise->future, NULL };
-            finish->finish_deps = finish_deps;
+            // Someone stole our last task...
+            // Create a new context to do other work,
+            // and suspend this finish scope pending on the outstanding tasks.
+            if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS) {
+                // create finish event
+                hclib_promise_t finish_promise;
+                hclib_promise_init(&finish_promise);
+                hclib_future_t *finish_deps[] = { &finish_promise.future, NULL };
+                finish->finish_deps = finish_deps;
 
-            LiteCtx *currentCtx = get_curr_lite_ctx();
-            HASSERT(currentCtx);
-            LiteCtx *newCtx = LiteCtx_create(_help_finish_ctx);
-            newCtx->arg = finish;
-
-            LOG_DEBUG("help_finish: newCtx = %p, newCtx->arg = %p\n", newCtx, newCtx->arg);
-            ctx_swap(currentCtx, newCtx, __func__);
-
-            // note: the other context checks out of the current finish scope
-
-            // destroy the context that resumed this one since it's now defunct
-            // (there are no other handles to it, and it will never be resumed)
-            LiteCtx_destroy(currentCtx->prev);
-            hclib_promise_free(finish_promise);
+                LOG_DEBUG("help_finish: finish = %p\n", finish);
+                _fiber_suspend(_get_curr_fiber(), _help_finish_ctx, finish);
+                // note: the other context checks out of the current finish scope
+            }
+            else {
+                HASSERT(HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_THREADS);
+                _swap_finish_thread(finish);
+            }
         } else {
             HASSERT(_hclib_atomic_load_relaxed(&finish->counter) == 1);
             // finish->counter == 1 implies that all the tasks are done
@@ -657,13 +833,31 @@ void help_finish(finish_t *finish) {
             _hclib_atomic_dec_acq_rel(&finish->counter);
         }
     }
-#else /* default (broken) strategy */
-    // FIXME - do I need to decrement the finish counter here?
-    _help_finish(finish);
-#endif /* HCLIB_???_STRATEGY */
+
+    else {
+        HASSERT(HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIXED);
+        check_out_finish(finish);
+        if (HCLIB_WORKER_OPTIONS & HCLIB_WORKER_OPTIONS_HELP_GLOBAL) {
+            // Try helping globally (to avoid spin-waiting)
+            // (internally checks if this option is enabled)
+            hclib_worker_state *ws = CURRENT_WS_INTERNAL;
+            while (_hclib_atomic_load_relaxed(&finish->counter) > 0) {
+                if (!_try_run_local(ws)) {
+                    while (_hclib_atomic_load_relaxed(&finish->counter) > 0) {
+                        _try_run_global(ws);
+                    }
+                    break;
+                }
+            }
+        }
+        else {
+            while (_hclib_atomic_load_relaxed(&finish->counter) > 0) {
+                // spin-wait
+            }
+        }
+    }
 
     HASSERT(_hclib_atomic_load_relaxed(&finish->counter) == 0);
-
 }
 
 /*
@@ -687,9 +881,7 @@ void hclib_start_finish() {
      * completed, or just the tasks launched so far.
      */
     finish->parent = ws->current_finish;
-#if HCLIB_LITECTX_STRATEGY
     finish->finish_deps = NULL;
-#endif
     check_in_finish(finish->parent); // check_in_finish performs NULL check
     ws->current_finish = finish;
     _hclib_atomic_store_release(&finish->counter, 1);
@@ -816,6 +1008,19 @@ static void hclib_init() {
     hclib_stats = getenv("HCLIB_STATS");
     bind_threads = (getenv("HCLIB_BIND_THREADS") != NULL);
 
+    if (HC_DEBUG_ENABLED) {
+        // Read worker strategy value from environment
+        const char *env_strategy = getenv("HCLIB_SET_WORKER_STRATEGY");
+        if (env_strategy) {
+            _hclib_worker_strategy_val = strtol(env_strategy, NULL, 0);
+        }
+        // Read worker strategy options value from environment
+        const char *env_options = getenv("HCLIB_SET_WORKER_OPTIONS");
+        if (env_options) {
+            _hclib_worker_options_val = strtol(env_options, NULL, 0);
+        }
+    }
+
     if (hclib_stats) {
         show_stats_header();
     }
@@ -831,18 +1036,14 @@ static void hclib_init() {
 
 
 static void hclib_finalize() {
-#if HCLIB_LITECTX_STRATEGY
-    LiteCtx *finalize_ctx = LiteCtx_proxy_create(__func__);
-    LiteCtx *finish_ctx = LiteCtx_create(_hclib_finalize_ctx);
-    CURRENT_WS_INTERNAL->root_ctx = finalize_ctx;
-    ctx_swap(finalize_ctx, finish_ctx, __func__);
-    // free resources
-    LiteCtx_destroy(finalize_ctx->prev);
-    LiteCtx_proxy_destroy(finalize_ctx);
-#else /* default (broken) strategy */
-    hclib_end_finish();
-    hclib_signal_join(hclib_context->nworkers);
-#endif /* HCLIB_LITECTX_STRATEGY */
+    if (HCLIB_WORKER_STRATEGY == HCLIB_WORKER_STRATEGY_FIBERS) {
+        _fiber_suspend(NULL, _hclib_finalize_ctx, NULL);
+    }
+    else {
+        hclib_end_finish();
+        // Signal shutdown to all worker threads
+        hclib_signal_join(hclib_context->nworkers);
+    }
 
     if (hclib_stats) {
         showStatsFooter();
@@ -864,8 +1065,8 @@ static void hclib_finalize() {
  * that the current parent is a fiber, and therefore its lifetime is already
  * managed by the runtime. If we allowed both system-managed threads (i.e. the
  * main thread) and fibers to reach end-finishes, we would have to know to
- * create a LiteCtx from the system-managed stacks and save them, but to not do
- * so when the calling context is already a LiteCtx. While this could be
+ * create a fiber from the system-managed stacks and save them, but to not do
+ * so when the calling context is already a fiber. While this could be
  * supported, this introduces unnecessary complexity into the runtime code. It
  * is simpler to use hclib_launch to ensure that finish scopes are only ever
  * reached from a fiber context, allowing us to assume that it is safe to simply
@@ -879,3 +1080,18 @@ void hclib_launch(generic_frame_ptr fct_ptr, void *arg) {
     hclib_finalize();
 }
 
+/**
+ * @brief Get current worker context-management strategy value.
+ * See inc/hclib-worker-config.h for the definitions of possible values.
+ */
+int64_t hclib_worker_strategy() {
+    return _hclib_worker_strategy_val;
+}
+
+/**
+ * @brief Get current worker strategy options mask value.
+ * See inc/hclib-worker-config.h for the definitions of possible values.
+ */
+int64_t hclib_worker_options() {
+    return _hclib_worker_options_val;
+}
