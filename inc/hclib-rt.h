@@ -14,14 +14,18 @@
  * limitations under the License.
  */
 
+#ifndef HCLIB_RT_H_
+#define HCLIB_RT_H_
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <assert.h>
-#include "litectx.h"
+#include <stdbool.h>
 
-#ifndef HCLIB_RT_H_
-#define HCLIB_RT_H_
+#include "hclib_common.h"
+
+#include "litectx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +61,12 @@ typedef struct hclib_worker_state {
 #define HCLIB_MACRO_CONCAT(x, y) _HCLIB_MACRO_CONCAT_IMPL(x, y)
 #define _HCLIB_MACRO_CONCAT_IMPL(x, y) x ## y
 
+#ifdef HCLIB_DEBUG
+#define HC_DEBUG_ENABLED 1
+#else
+#define HC_DEBUG_ENABLED 0
+#endif
+
 #ifdef HC_ASSERTION_CHECK
 #define HC_ASSERTION_CHECK_ENABLED 1
 #else
@@ -77,6 +87,15 @@ typedef struct hclib_worker_state {
 #else // C11 static assert
 #define HASSERT_STATIC _Static_assert
 #endif
+
+#define HCHECK(expr) do { \
+    long _hclib_check_rt_result = expr; \
+    if (_hclib_check_rt_result != 0) { \
+        fprintf(stderr, "W%d: Non-zero return value (%ld) from:\n\t%s\n", \
+                get_current_worker(), _hclib_check_rt_result, #expr); \
+        abort(); \
+    } \
+} while (0);
 
 #define CURRENT_WS_INTERNAL ((hclib_worker_state *) pthread_getspecific(ws_key))
 
